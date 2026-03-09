@@ -160,9 +160,11 @@ jobs:
       - name: Substitute variables in manifests
         env:
           TLS_SECRET: ${{ steps.tls.outputs.secret_name }}
-          IMAGE_TAG: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
           GITHUB_ORG: ${{ github.repository_owner }}
         run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
+          echo "Using image: ${IMAGE_TAG}"
           shopt -s globstar
           for f in k8s/**/*.yaml k8s/*.yaml; do
             [ -f "$f" ] || continue
