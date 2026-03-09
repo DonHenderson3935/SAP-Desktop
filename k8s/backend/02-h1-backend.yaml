@@ -20,6 +20,8 @@ spec:
         # Disable Istio H2 upgrade for this pod to force H1.1 from sidecar
         traffic.sidecar.istio.io/includeInboundPorts: "8080"
     spec:
+      imagePullSecrets:
+        - name: ghcr-pull-secret
       containers:
         - name: echo-server
           image: ghcr.io/GITHUB_ORG/ewp-kyma/echo-server:latest

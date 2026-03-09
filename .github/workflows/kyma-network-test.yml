@@ -181,6 +181,19 @@ jobs:
       - name: Apply namespace
         run: kubectl apply -f k8s/00-namespace.yaml
 
+      - name: Create GHCR image pull secret
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GITHUB_ORG: ${{ github.repository_owner }}
+        run: |
+          kubectl create secret docker-registry ghcr-pull-secret \
+            --namespace=${{ env.NAMESPACE }} \
+            --docker-server=ghcr.io \
+            --docker-username="${GITHUB_ORG}" \
+            --docker-password="${GHCR_TOKEN}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          echo "✓ GHCR pull secret created"
+
       - name: Deploy backend services
         run: |
           kubectl apply -f k8s/backend/01-h2-backend.yaml
@@ -199,6 +212,19 @@ jobs:
             | grep -oE "[0-9]+\.[0-9]+" | head -1 || echo "unknown")
           echo "Istio version (chart label): ${ISTIO_VER}"
           kubectl apply -f k8s/gateway/05-envoyfilter-quic.yaml
+
+      - name: Diagnose pod status
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods -n ${{ env.NAMESPACE }} -o wide
+          echo ""
+          echo "=== Events (last 20) ==="
+          kubectl get events -n ${{ env.NAMESPACE }} \
+            --sort-by='.lastTimestamp' | tail -20
+          echo ""
+          echo "=== echo-h2 pod describe ==="
+          kubectl describe pod -n ${{ env.NAMESPACE }} \
+            -l app=echo-h2 2>/dev/null | tail -30 || true
 
       - name: Wait for backends to be ready
         run: |
