@@ -131,16 +131,20 @@ jobs:
             --user=ci-runner
           kubectl config use-context kyma
           rm -f /tmp/ca.crt
+          echo "✓ Kubeconfig configured"
+          echo "Token prefix: ${K8S_SA_TOKEN:0:10}... (length: ${#K8S_SA_TOKEN})"
 
       - name: Verify cluster connectivity
         run: |
-          kubectl cluster-info
-          echo ""
           echo "Kyma instance : ${{ env.KYMA_INSTANCE_ID }}"
           echo "API server    : ${{ env.KYMA_API_SERVER }}"
           echo "Test domain   : ${{ env.TEST_DOMAIN }}"
           echo ""
-          kubectl get nodes -o wide
+          kubectl version
+          echo ""
+          kubectl get nodes -o wide || echo "::warning::Cannot list nodes (insufficient RBAC — non-fatal)"
+          echo ""
+          kubectl auth can-i create deployments --namespace=${{ env.NAMESPACE }} || echo "::error::ci-runner cannot create deployments in ${{ env.NAMESPACE }}"
 
       - name: Detect Kyma wildcard TLS secret
         id: tls
