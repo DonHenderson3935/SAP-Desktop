@@ -1,0 +1,470 @@
+name: Kyma Network Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload_size:
+        description: "Throughput payload bytes (default 1048576 = 1MB)"
+        required: false
+        default: "1048576"
+      vus:
+        description: "k6 virtual users for throughput test"
+        required: false
+        default: "20"
+      duration:
+        description: "Throughput test duration (e.g. 120s)"
+        required: false
+        default: "120s"
+      skip_cleanup:
+        description: "Skip resource cleanup after test"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+  schedule:
+    - cron: "0 2 * * 1"  # Every Monday 02:00 UTC
+
+# ─────────────────────────────────────────────────────────────
+# Known Kyma Trial Instance Constants
+# Instance  : A83C07AB-169C-4CF6-89EC-A9F095B554E2
+# API Server: https://api.c-2a1d8cc.kyma.ondemand.com
+# Dashboard : https://dashboard.kyma.cloud.sap/?kubeconfigID=A83C07AB-169C-4CF6-89EC-A9F095B554E2
+#
+# Required GitHub Secrets (set once via bootstrap script):
+#   K8S_SERVER   - https://api.c-2a1d8cc.kyma.ondemand.com
+#   K8S_SA_TOKEN - ServiceAccount token (ci-runner, network-test ns)
+#   K8S_CA_DATA  - base64 cluster CA certificate
+# ─────────────────────────────────────────────────────────────
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/ewp-kyma/echo-server
+  NAMESPACE: network-test
+  TEST_DOMAIN: c-2a1d8cc.kyma.ondemand.com
+  KYMA_INSTANCE_ID: A83C07AB-169C-4CF6-89EC-A9F095B554E2
+  KYMA_API_SERVER: https://api.c-2a1d8cc.kyma.ondemand.com
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # Job 1: Build & push echo-server image to GHCR
+  # ─────────────────────────────────────────────────────────────
+  build-image:
+    name: Build & Push Echo Server Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend/echo-server
+          file: ./backend/echo-server/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+  # ─────────────────────────────────────────────────────────────
+  # Job 2: Deploy test infrastructure to Kyma
+  # ─────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to Kyma
+    runs-on: ubuntu-latest
+    needs: build-image
+    permissions:
+      contents: read
+    environment: kyma-network-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.28.0"
+
+      - name: Configure kubeconfig (ServiceAccount token)
+        run: |
+          mkdir -p $HOME/.kube
+          cat > $HOME/.kube/config <<EOF
+          apiVersion: v1
+          kind: Config
+          clusters:
+          - name: kyma
+            cluster:
+              server: ${{ secrets.K8S_SERVER }}
+              certificate-authority-data: ${{ secrets.K8S_CA_DATA }}
+          users:
+          - name: ci-runner
+            user:
+              token: ${{ secrets.K8S_SA_TOKEN }}
+          contexts:
+          - name: kyma
+            context:
+              cluster: kyma
+              user: ci-runner
+          current-context: kyma
+          EOF
+          chmod 600 $HOME/.kube/config
+
+      - name: Verify cluster connectivity
+        run: |
+          kubectl cluster-info
+          echo ""
+          echo "Kyma instance : ${{ env.KYMA_INSTANCE_ID }}"
+          echo "API server    : ${{ env.KYMA_API_SERVER }}"
+          echo "Test domain   : ${{ env.TEST_DOMAIN }}"
+          echo ""
+          kubectl get nodes -o wide
+
+      - name: Detect Kyma wildcard TLS secret
+        id: tls
+        run: |
+          SECRET=$(kubectl get secret -n istio-system \
+            -o json 2>/dev/null \
+            | jq -r '.items[] | select(.type=="kubernetes.io/tls") | .metadata.name' \
+            | grep -E "wildcard|kyma|gardener|shoot" | head -1 || echo "")
+          SECRET="${SECRET:-network-test-tls}"
+          echo "secret_name=${SECRET}" >> $GITHUB_OUTPUT
+          echo "✓ Using TLS secret: ${SECRET}"
+
+      - name: Substitute variables in manifests
+        env:
+          TLS_SECRET: ${{ steps.tls.outputs.secret_name }}
+          IMAGE_TAG: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          GITHUB_ORG: ${{ github.repository_owner }}
+        run: |
+          shopt -s globstar
+          for f in k8s/**/*.yaml k8s/*.yaml; do
+            [ -f "$f" ] || continue
+            sed -i \
+              -e "s|\${TEST_DOMAIN}|${{ env.TEST_DOMAIN }}|g" \
+              -e "s|ghcr.io/GITHUB_ORG/ewp-kyma/echo-server:latest|${IMAGE_TAG}|g" \
+              -e "s|GITHUB_ORG|${GITHUB_ORG}|g" \
+              -e "s|network-test-tls|${TLS_SECRET}|g" \
+              "$f"
+          done
+          echo "✓ Manifests ready for domain: ${{ env.TEST_DOMAIN }}"
+
+      - name: Apply namespace
+        run: kubectl apply -f k8s/00-namespace.yaml
+
+      - name: Deploy backend services
+        run: |
+          kubectl apply -f k8s/backend/01-h2-backend.yaml
+          kubectl apply -f k8s/backend/02-h1-backend.yaml
+
+      - name: Apply Istio traffic management
+        run: |
+          kubectl apply -f k8s/gateway/04-gateway.yaml
+          kubectl apply -f k8s/gateway/06-virtual-service.yaml
+          kubectl apply -f k8s/gateway/07-destination-rule.yaml
+
+      - name: Apply EnvoyFilter for QUIC/HTTP3
+        run: |
+          ISTIO_VER=$(kubectl get deployment -n istio-system istiod \
+            -o jsonpath='{.metadata.labels.chart}' 2>/dev/null \
+            | grep -oE "[0-9]+\.[0-9]+" | head -1 || echo "unknown")
+          echo "Istio version (chart label): ${ISTIO_VER}"
+          kubectl apply -f k8s/gateway/05-envoyfilter-quic.yaml
+
+      - name: Wait for backends to be ready
+        run: |
+          kubectl rollout status deployment/echo-h2 -n ${{ env.NAMESPACE }} --timeout=180s
+          kubectl rollout status deployment/echo-h1 -n ${{ env.NAMESPACE }} --timeout=180s
+
+      - name: Deployment summary
+        run: |
+          GW_IP=$(kubectl get svc -n istio-system istio-ingressgateway \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}' \
+            2>/dev/null || echo "pending")
+
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Kyma Instance | \`${{ env.KYMA_INSTANCE_ID }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| API Server | ${{ env.KYMA_API_SERVER }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Test Domain | \`${{ env.TEST_DOMAIN }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Base URL | https://network-test.${{ env.TEST_DOMAIN }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| TLS Secret | \`${{ steps.tls.outputs.secret_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`sha-${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ingress Gateway | \`${GW_IP}\` |" >> $GITHUB_STEP_SUMMARY
+
+  # ─────────────────────────────────────────────────────────────
+  # Job 3: Protocol Negotiation Tests
+  # ─────────────────────────────────────────────────────────────
+  test-protocol:
+    name: Protocol Negotiation Tests
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure kubeconfig (ServiceAccount token)
+        run: |
+          mkdir -p $HOME/.kube
+          cat > $HOME/.kube/config <<EOF
+          apiVersion: v1
+          kind: Config
+          clusters:
+          - name: kyma
+            cluster:
+              server: ${{ secrets.K8S_SERVER }}
+              certificate-authority-data: ${{ secrets.K8S_CA_DATA }}
+          users:
+          - name: ci-runner
+            user:
+              token: ${{ secrets.K8S_SA_TOKEN }}
+          contexts:
+          - name: kyma
+            context:
+              cluster: kyma
+              user: ci-runner
+          current-context: kyma
+          EOF
+          chmod 600 $HOME/.kube/config
+
+      - name: Wait for endpoint to be reachable
+        run: |
+          BASE_URL="https://network-test.${{ env.TEST_DOMAIN }}"
+          echo "Polling: ${BASE_URL}/health"
+          for i in $(seq 1 36); do
+            if curl -skf --max-time 8 "${BASE_URL}/health" > /dev/null 2>&1; then
+              echo "✓ Endpoint ready (attempt ${i})"
+              break
+            fi
+            if [ "$i" -eq 36 ]; then
+              echo "::error::Endpoint not reachable after 6 minutes"
+              exit 1
+            fi
+            echo "  Attempt ${i}/36 - sleeping 10s..."
+            sleep 10
+          done
+
+      - name: Test HTTP/1.1 → H1.1 backend
+        run: |
+          BASE_URL="https://network-test.${{ env.TEST_DOMAIN }}"
+          echo "=== HTTP/1.1 → H1.1 backend ==="
+          curl -skv --http1.1 "${BASE_URL}/h1/" 2>&1 | tee /tmp/h1-result.txt
+          echo "--- Key headers ---"
+          grep -E "< HTTP|x-backend-protocol|protocol" /tmp/h1-result.txt || true
+
+      - name: Test HTTP/2 → H2 backend
+        run: |
+          BASE_URL="https://network-test.${{ env.TEST_DOMAIN }}"
+          echo "=== HTTP/2 → H2 backend ==="
+          curl -skv --http2 "${BASE_URL}/h2/" 2>&1 | tee /tmp/h2-result.txt
+          echo "--- Key headers ---"
+          grep -E "< HTTP|x-backend-protocol|protocol|h2" /tmp/h2-result.txt || true
+
+      - name: Check Alt-Svc header (HTTP/3 / QUIC advertisement)
+        id: altsvc
+        run: |
+          BASE_URL="https://network-test.${{ env.TEST_DOMAIN }}"
+          echo "=== Alt-Svc Header ==="
+          ALTSVC=$(curl -sk --http2 -I "${BASE_URL}/" | grep -i "^alt-svc:" || echo "")
+          echo "Alt-Svc: ${ALTSVC:-<not present>}"
+          if echo "${ALTSVC}" | grep -qi "h3"; then
+            echo "quic_advertised=true" >> $GITHUB_OUTPUT
+            echo "✓ QUIC/HTTP3 advertised to clients"
+          else
+            echo "quic_advertised=false" >> $GITHUB_OUTPUT
+            echo "⚠ Alt-Svc h3 not found — EnvoyFilter may need Istio >= 1.20"
+          fi
+
+      - name: Test QUIC/HTTP3 (static curl with quiche)
+        run: |
+          BASE_URL="https://network-test.${{ env.TEST_DOMAIN }}"
+          CURL_VERSION="8.6.0"
+          echo "=== Installing curl with HTTP/3 support ==="
+          curl -fsSL \
+            "https://github.com/stunnel/static-curl/releases/download/${CURL_VERSION}/curl-linux-x86_64-${CURL_VERSION}.tar.xz" \
+            -o /tmp/curl-quic.tar.xz || {
+              echo "⚠ Static curl download failed, skipping QUIC test"
+              exit 0
+            }
+          tar -xf /tmp/curl-quic.tar.xz -C /tmp
+          CURL_BIN="/tmp/curl"
+          chmod +x "${CURL_BIN}"
+          "${CURL_BIN}" --version | head -2
+
+          echo ""
+          echo "=== HTTP/3 (QUIC) connection test ==="
+          "${CURL_BIN}" -skv --http3-only "${BASE_URL}/" 2>&1 | tee /tmp/quic-result.txt || \
+          "${CURL_BIN}" -skv --http3 "${BASE_URL}/" 2>&1      | tee /tmp/quic-result.txt || \
+          echo "⚠ HTTP/3 failed (Istio QUIC may not be enabled)"
+
+          echo "--- Key output ---"
+          grep -iE "HTTP/[123]|quic|h3|protocol" /tmp/quic-result.txt | head -20 || true
+
+      - name: Protocol test summary
+        if: always()
+        run: |
+          H1_PROTO=$(grep -oE "HTTP/1\.[01] [0-9]+" /tmp/h1-result.txt 2>/dev/null | head -1 || echo "N/A")
+          H2_PROTO=$(grep -oE "HTTP/2 [0-9]*"       /tmp/h2-result.txt 2>/dev/null | head -1 || echo "N/A")
+          H3_PROTO=$(grep -oE "HTTP/3 [0-9]*|QUIC"  /tmp/quic-result.txt 2>/dev/null | head -1 || echo "N/A")
+
+          echo "## Protocol Negotiation Results" >> $GITHUB_STEP_SUMMARY
+          echo "**Instance**: \`${{ env.KYMA_INSTANCE_ID }}\` | **Domain**: \`${{ env.TEST_DOMAIN }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Test | Client → Gateway | Gateway → Backend | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----------------|-------------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| H1.1 path | HTTP/1.1 | HTTP/1.1 (DO_NOT_UPGRADE) | ${H1_PROTO} |" >> $GITHUB_STEP_SUMMARY
+          echo "| H2 path   | HTTP/2   | HTTP/2 (UPGRADE)          | ${H2_PROTO} |" >> $GITHUB_STEP_SUMMARY
+          echo "| QUIC/H3   | HTTP/3   | HTTP/2 (internal)         | ${H3_PROTO} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Alt-Svc   | —        | —                         | ${{ steps.altsvc.outputs.quic_advertised }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload protocol logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: protocol-test-logs-${{ github.run_id }}
+          path: /tmp/*-result.txt
+          retention-days: 14
+
+  # ─────────────────────────────────────────────────────────────
+  # Job 4: k6 Throughput & Stress Tests
+  # ─────────────────────────────────────────────────────────────
+  test-performance:
+    name: k6 Performance Tests
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install k6
+        run: |
+          curl -fsSL \
+            https://github.com/grafana/k6/releases/download/v0.50.0/k6-v0.50.0-linux-amd64.tar.gz \
+            | tar -xz --strip-components=1 -C /usr/local/bin k6-v0.50.0-linux-amd64/k6
+          k6 version
+
+      - name: Create results directory
+        run: mkdir -p results
+
+      - name: Run protocol negotiation test (k6)
+        run: |
+          k6 run \
+            --env BASE_URL="https://network-test.${{ env.TEST_DOMAIN }}" \
+            --out json=results/protocol-check-raw.json \
+            tests/k6/01-protocol-check.js
+
+      - name: Run throughput benchmark (H2 vs H1.1)
+        run: |
+          k6 run \
+            --env BASE_URL="https://network-test.${{ env.TEST_DOMAIN }}" \
+            --env PAYLOAD_SIZE="${{ github.event.inputs.payload_size || '1048576' }}" \
+            --env VUS="${{ github.event.inputs.vus || '20' }}" \
+            --env DURATION="${{ github.event.inputs.duration || '120s' }}" \
+            --out json=results/throughput-raw.json \
+            tests/k6/02-throughput.js
+
+      - name: Run stress ramp test
+        run: |
+          k6 run \
+            --env BASE_URL="https://network-test.${{ env.TEST_DOMAIN }}" \
+            --out json=results/stress-raw.json \
+            tests/k6/03-stress.js || true
+
+      - name: Generate performance summary
+        if: always()
+        run: |
+          echo "## k6 Performance Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "**Domain**: \`${{ env.TEST_DOMAIN }}\` | **Payload**: ${{ github.event.inputs.payload_size || '1048576' }}B | **VUs**: ${{ github.event.inputs.vus || '20' }} | **Duration**: ${{ github.event.inputs.duration || '120s' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          for summary in results/*-summary.json; do
+            [ -f "$summary" ] || continue
+            label=$(basename "$summary" -summary.json)
+            echo "### ${label}" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat "$summary" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          done
+
+      - name: Upload k6 results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: k6-results-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────
+  # Job 5: Cleanup
+  # ─────────────────────────────────────────────────────────────
+  cleanup:
+    name: Cleanup Kyma Resources
+    runs-on: ubuntu-latest
+    needs: [test-protocol, test-performance]
+    if: always() && github.event.inputs.skip_cleanup != 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.28.0"
+
+      - name: Configure kubeconfig (ServiceAccount token)
+        run: |
+          mkdir -p $HOME/.kube
+          cat > $HOME/.kube/config <<EOF
+          apiVersion: v1
+          kind: Config
+          clusters:
+          - name: kyma
+            cluster:
+              server: ${{ secrets.K8S_SERVER }}
+              certificate-authority-data: ${{ secrets.K8S_CA_DATA }}
+          users:
+          - name: ci-runner
+            user:
+              token: ${{ secrets.K8S_SA_TOKEN }}
+          contexts:
+          - name: kyma
+            context:
+              cluster: kyma
+              user: ci-runner
+          current-context: kyma
+          EOF
+          chmod 600 $HOME/.kube/config
+
+      - name: Delete all test resources
+        run: |
+          kubectl delete -f k8s/gateway/05-envoyfilter-quic.yaml --ignore-not-found=true
+          kubectl delete -f k8s/gateway/07-destination-rule.yaml --ignore-not-found=true
+          kubectl delete -f k8s/gateway/06-virtual-service.yaml  --ignore-not-found=true
+          kubectl delete -f k8s/gateway/04-gateway.yaml          --ignore-not-found=true
+          kubectl delete -f k8s/backend/01-h2-backend.yaml       --ignore-not-found=true
+          kubectl delete -f k8s/backend/02-h1-backend.yaml       --ignore-not-found=true
+          kubectl delete namespace ${{ env.NAMESPACE }} --ignore-not-found=true --wait=false
+          echo "✓ Cleanup complete"

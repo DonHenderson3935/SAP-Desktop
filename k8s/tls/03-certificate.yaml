@@ -1,0 +1,25 @@
+---
+# TLS Secret for the Istio Ingress Gateway.
+# In real Kyma BTP clusters, cert-manager or Kyma's built-in cert management handles this.
+# Replace TEST_DOMAIN with your actual domain (e.g., from Kyma cluster info).
+# You can also use `kubectl create secret tls` instead.
+#
+# If using cert-manager (available in Kyma):
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: network-test-tls
+  namespace: istio-system
+spec:
+  secretName: network-test-tls
+  duration: 2160h    # 90 days
+  renewBefore: 360h  # 15 days before
+  issuerRef:
+    name: kyma-gateway-issuer
+    kind: ClusterIssuer
+  dnsNames:
+    - "network-test.${TEST_DOMAIN}"
+    - "*.${TEST_DOMAIN}"
+  usages:
+    - server auth
+    - client auth

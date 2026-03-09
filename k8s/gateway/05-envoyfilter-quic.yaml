@@ -1,0 +1,102 @@
+---
+# EnvoyFilter: enables QUIC/HTTP3 on the Istio Ingress Gateway (UDP 443)
+# Requires Istio >= 1.20 and Envoy >= 1.28 (QUIC support is stable)
+# Kyma BTP uses managed Istio; verify the Istio version before applying.
+#
+# How it works:
+#   1. Adds a UDP listener on port 443 (QUIC transport)
+#   2. Sets Alt-Svc response header → tells clients to upgrade to HTTP/3
+#   3. Client-facing: QUIC (H3)  →  Backend: H2 or H1.1 (TCP, controlled by DestinationRule)
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: quic-ingressgateway
+  namespace: istio-system
+spec:
+  workloadSelector:
+    labels:
+      istio: ingressgateway
+      app: istio-ingressgateway
+  configPatches:
+    # Patch 1: Add Alt-Svc header to all HTTPS responses to advertise HTTP/3
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          portNumber: 443
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                name: envoy.filters.http.router
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.header_mutation
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
+            mutations:
+              response_mutations:
+                - append:
+                    header:
+                      key: alt-svc
+                      value: 'h3=":443"; ma=86400'
+                    keep_empty_value: true
+
+    # Patch 2: Add QUIC UDP listener on port 443
+    - applyTo: LISTENER
+      match:
+        context: GATEWAY
+      patch:
+        operation: ADD
+        value:
+          name: quic_listener_443
+          address:
+            socket_address:
+              protocol: UDP
+              address: "0.0.0.0"
+              port_value: 443
+          udp_listener_config:
+            downstream_socket_config: {}
+            quic_options:
+              enabled:
+                default_value: true
+                runtime_key: quic.enabled
+          filter_chains:
+            - transport_socket:
+                name: envoy.transport_sockets.quic
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.transport_sockets.quic.v3.QuicDownstreamTransport
+                  downstream_tls_context:
+                    common_tls_context:
+                      tls_certificate_sds_secret_configs:
+                        - name: network-test-tls
+                          sds_config:
+                            api_config_source:
+                              api_type: GRPC
+                              grpc_services:
+                                - envoy_grpc:
+                                    cluster_name: sds-grpc
+                            resource_api_version: V3
+                      alpn_protocols:
+                        - h3
+              filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    codec_type: HTTP3
+                    stat_prefix: quic_ingressgateway
+                    use_remote_address: true
+                    route_config:
+                      virtual_hosts:
+                        - name: local
+                          domains: ["*"]
+                          routes:
+                            - match:
+                                prefix: "/"
+                              route:
+                                cluster: outbound|8080||echo-h2.network-test.svc.cluster.local
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router

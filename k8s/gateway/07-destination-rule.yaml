@@ -1,0 +1,73 @@
+---
+# DestinationRule for echo-h2: force HTTP/2 upstream (client → Envoy → backend via H2)
+# Istio mTLS is ISTIO_MUTUAL by default in Kyma; connections inside the mesh use H2 with mTLS.
+# This explicitly sets H2 upgrade policy to ensure H2 is used end-to-end inside the mesh.
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: echo-h2-dr
+  namespace: network-test
+spec:
+  host: echo-h2.network-test.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      http:
+        http2MaxRequests: 1000
+        maxRequestsPerConnection: 100
+        h2UpgradePolicy: UPGRADE       # Force H2 to backend
+      tcp:
+        maxConnections: 100
+        connectTimeout: 5s
+    tls:
+      mode: ISTIO_MUTUAL               # mTLS within the Kyma/Istio mesh
+    loadBalancer:
+      simple: LEAST_CONN
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 10s
+      baseEjectionTime: 30s
+  subsets:
+    - name: h2-upstream
+      labels:
+        app: echo-h2
+      trafficPolicy:
+        connectionPool:
+          http:
+            h2UpgradePolicy: UPGRADE   # Confirm H2 at subset level
+
+---
+# DestinationRule for echo-h1: downgrade to HTTP/1.1 upstream
+# Use DOWNGRADE to force H1.1 even if the backend supports H2.
+# This simulates fallback behavior.
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: echo-h1-dr
+  namespace: network-test
+spec:
+  host: echo-h1.network-test.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      http:
+        http1MaxPendingRequests: 1000
+        maxRequestsPerConnection: 0
+        h2UpgradePolicy: DO_NOT_UPGRADE  # Force H1.1 to backend
+      tcp:
+        maxConnections: 100
+        connectTimeout: 5s
+    tls:
+      mode: ISTIO_MUTUAL
+    loadBalancer:
+      simple: ROUND_ROBIN
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 10s
+      baseEjectionTime: 30s
+  subsets:
+    - name: h1-upstream
+      labels:
+        app: echo-h1
+      trafficPolicy:
+        connectionPool:
+          http:
+            h2UpgradePolicy: DO_NOT_UPGRADE  # Confirm H1.1 at subset level

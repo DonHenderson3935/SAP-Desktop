@@ -1,0 +1,84 @@
+---
+# VirtualService: routes traffic from the Gateway to H2 or H1.1 backends
+# Path-based routing:
+#   /h2/*   → echo-h2 service (Istio will use H2 per DestinationRule)
+#   /h1/*   → echo-h1 service (Istio will use H1.1 per DestinationRule)
+#   /       → echo-h2 (default)
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: network-test-vs
+  namespace: network-test
+spec:
+  hosts:
+    - "network-test.${TEST_DOMAIN}"
+  gateways:
+    - network-test-gateway
+  http:
+    - name: "route-h2"
+      match:
+        - uri:
+            prefix: "/h2"
+      rewrite:
+        uri: "/"
+      route:
+        - destination:
+            host: echo-h2.network-test.svc.cluster.local
+            port:
+              number: 8080
+            subset: h2-upstream
+      timeout: 30s
+      retries:
+        attempts: 3
+        perTryTimeout: 10s
+
+    - name: "route-h1"
+      match:
+        - uri:
+            prefix: "/h1"
+      rewrite:
+        uri: "/"
+      route:
+        - destination:
+            host: echo-h1.network-test.svc.cluster.local
+            port:
+              number: 8080
+            subset: h1-upstream
+      timeout: 30s
+
+    - name: "route-throughput-h2"
+      match:
+        - uri:
+            prefix: "/throughput/h2"
+      rewrite:
+        uri: "/throughput"
+      route:
+        - destination:
+            host: echo-h2.network-test.svc.cluster.local
+            port:
+              number: 8080
+            subset: h2-upstream
+      timeout: 120s
+
+    - name: "route-throughput-h1"
+      match:
+        - uri:
+            prefix: "/throughput/h1"
+      rewrite:
+        uri: "/throughput"
+      route:
+        - destination:
+            host: echo-h1.network-test.svc.cluster.local
+            port:
+              number: 8080
+            subset: h1-upstream
+      timeout: 120s
+
+    - name: "default"
+      route:
+        - destination:
+            host: echo-h2.network-test.svc.cluster.local
+            port:
+              number: 8080
+            subset: h2-upstream
+      timeout: 30s
