@@ -20,7 +20,9 @@ on:
         required: false
         default: "false"
         type: choice
-        options: ["false", "true"]
+        options:
+          - "false"
+          - "true"
   schedule:
     - cron: "0 2 * * 1"  # Every Monday 02:00 UTC
 
@@ -110,27 +112,31 @@ jobs:
           version: "v1.28.0"
 
       - name: Configure kubeconfig (ServiceAccount token)
+        env:
+          K8S_SERVER: ${{ secrets.K8S_SERVER }}
+          K8S_CA_DATA: ${{ secrets.K8S_CA_DATA }}
+          K8S_SA_TOKEN: ${{ secrets.K8S_SA_TOKEN }}
         run: |
           mkdir -p $HOME/.kube
-          cat > $HOME/.kube/config <<EOF
-          apiVersion: v1
-          kind: Config
-          clusters:
-          - name: kyma
-            cluster:
-              server: ${{ secrets.K8S_SERVER }}
-              certificate-authority-data: ${{ secrets.K8S_CA_DATA }}
-          users:
-          - name: ci-runner
-            user:
-              token: ${{ secrets.K8S_SA_TOKEN }}
-          contexts:
-          - name: kyma
-            context:
-              cluster: kyma
-              user: ci-runner
-          current-context: kyma
-          EOF
+          printf '%s\n' \
+            'apiVersion: v1' \
+            'kind: Config' \
+            'clusters:' \
+            '- name: kyma' \
+            '  cluster:' \
+            "    server: ${K8S_SERVER}" \
+            "    certificate-authority-data: ${K8S_CA_DATA}" \
+            'users:' \
+            '- name: ci-runner' \
+            '  user:' \
+            "    token: ${K8S_SA_TOKEN}" \
+            'contexts:' \
+            '- name: kyma' \
+            '  context:' \
+            '    cluster: kyma' \
+            '    user: ci-runner' \
+            'current-context: kyma' \
+            > $HOME/.kube/config
           chmod 600 $HOME/.kube/config
 
       - name: Verify cluster connectivity
@@ -228,27 +234,31 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure kubeconfig (ServiceAccount token)
+        env:
+          K8S_SERVER: ${{ secrets.K8S_SERVER }}
+          K8S_CA_DATA: ${{ secrets.K8S_CA_DATA }}
+          K8S_SA_TOKEN: ${{ secrets.K8S_SA_TOKEN }}
         run: |
           mkdir -p $HOME/.kube
-          cat > $HOME/.kube/config <<EOF
-          apiVersion: v1
-          kind: Config
-          clusters:
-          - name: kyma
-            cluster:
-              server: ${{ secrets.K8S_SERVER }}
-              certificate-authority-data: ${{ secrets.K8S_CA_DATA }}
-          users:
-          - name: ci-runner
-            user:
-              token: ${{ secrets.K8S_SA_TOKEN }}
-          contexts:
-          - name: kyma
-            context:
-              cluster: kyma
-              user: ci-runner
-          current-context: kyma
-          EOF
+          printf '%s\n' \
+            'apiVersion: v1' \
+            'kind: Config' \
+            'clusters:' \
+            '- name: kyma' \
+            '  cluster:' \
+            "    server: ${K8S_SERVER}" \
+            "    certificate-authority-data: ${K8S_CA_DATA}" \
+            'users:' \
+            '- name: ci-runner' \
+            '  user:' \
+            "    token: ${K8S_SA_TOKEN}" \
+            'contexts:' \
+            '- name: kyma' \
+            '  context:' \
+            '    cluster: kyma' \
+            '    user: ci-runner' \
+            'current-context: kyma' \
+            > $HOME/.kube/config
           chmod 600 $HOME/.kube/config
 
       - name: Wait for endpoint to be reachable
@@ -435,27 +445,31 @@ jobs:
           version: "v1.28.0"
 
       - name: Configure kubeconfig (ServiceAccount token)
+        env:
+          K8S_SERVER: ${{ secrets.K8S_SERVER }}
+          K8S_CA_DATA: ${{ secrets.K8S_CA_DATA }}
+          K8S_SA_TOKEN: ${{ secrets.K8S_SA_TOKEN }}
         run: |
           mkdir -p $HOME/.kube
-          cat > $HOME/.kube/config <<EOF
-          apiVersion: v1
-          kind: Config
-          clusters:
-          - name: kyma
-            cluster:
-              server: ${{ secrets.K8S_SERVER }}
-              certificate-authority-data: ${{ secrets.K8S_CA_DATA }}
-          users:
-          - name: ci-runner
-            user:
-              token: ${{ secrets.K8S_SA_TOKEN }}
-          contexts:
-          - name: kyma
-            context:
-              cluster: kyma
-              user: ci-runner
-          current-context: kyma
-          EOF
+          printf '%s\n' \
+            'apiVersion: v1' \
+            'kind: Config' \
+            'clusters:' \
+            '- name: kyma' \
+            '  cluster:' \
+            "    server: ${K8S_SERVER}" \
+            "    certificate-authority-data: ${K8S_CA_DATA}" \
+            'users:' \
+            '- name: ci-runner' \
+            '  user:' \
+            "    token: ${K8S_SA_TOKEN}" \
+            'contexts:' \
+            '- name: kyma' \
+            '  context:' \
+            '    cluster: kyma' \
+            '    user: ci-runner' \
+            'current-context: kyma' \
+            > $HOME/.kube/config
           chmod 600 $HOME/.kube/config
 
       - name: Delete all test resources
