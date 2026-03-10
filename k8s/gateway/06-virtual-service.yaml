@@ -20,4 +20,3 @@ spec:
             port:
               number: 8080
             subset: grpc-upstream
-      timeout: 0s
