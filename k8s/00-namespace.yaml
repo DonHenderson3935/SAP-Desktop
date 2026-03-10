@@ -1,8 +1,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: network-test
+  name: ewp
   labels:
     istio-injection: enabled
     app.kubernetes.io/managed-by: github-actions
-    test-suite: kyma-network

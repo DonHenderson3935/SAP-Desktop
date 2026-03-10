@@ -1,54 +1,56 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: echo-h1
-  namespace: network-test
+  name: ewp-server
+  namespace: ewp
   labels:
-    app: echo-h1
+    app: ewp-server
     version: v1
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
-      app: echo-h1
+      app: ewp-server
   template:
     metadata:
       labels:
-        app: echo-h1
+        app: ewp-server
         version: v1
-      annotations:
-        # Disable Istio H2 upgrade for this pod to force H1.1 from sidecar
-        traffic.sidecar.istio.io/includeInboundPorts: "8080"
     spec:
       imagePullSecrets:
         - name: ghcr-pull-secret
       containers:
-        - name: echo-server
-          image: ghcr.io/GITHUB_ORG/ewp-kyma/echo-server:latest
+        - name: ewp-server
+          image: ghcr.io/GITHUB_ORG/ewp-kyma/ewp-server:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
-              name: http
+              name: grpc
               protocol: TCP
           env:
             - name: PORT
               value: "8080"
+            - name: GRPC_SERVICE
+              value: "api"
+            - name: UUID
+              value: "d342d11e-d424-4583-b36e-524ab1f0afa4"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
-              cpu: 50m
-              memory: 64Mi
+              cpu: 100m
+              memory: 128Mi
             limits:
               cpu: 500m
               memory: 256Mi
           readinessProbe:
-            httpGet:
-              path: /health
+            tcpSocket:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
-            httpGet:
-              path: /health
+            tcpSocket:
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 30
@@ -59,6 +61,9 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+      volumes:
+        - name: tmp
+          emptyDir: {}
       securityContext:
         seccompProfile:
           type: RuntimeDefault
@@ -66,18 +71,15 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: echo-h1
-  namespace: network-test
+  name: ewp-server
+  namespace: ewp
   labels:
-    app: echo-h1
-  annotations:
-    # Explicitly mark as HTTP/1.1 for Istio protocol detection
-    service.istio.io/canonical-name: echo-h1
+    app: ewp-server
 spec:
   selector:
-    app: echo-h1
+    app: ewp-server
   ports:
-    - name: http
+    - name: grpc
       port: 8080
       targetPort: 8080
       protocol: TCP

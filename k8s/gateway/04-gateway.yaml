@@ -1,32 +1,27 @@
----
-# Istio Gateway: accepts HTTPS (H1.1 + H2) on port 443
-# QUIC/HTTP3 is enabled via the EnvoyFilter in 05-envoyfilter-quic.yaml
 apiVersion: networking.istio.io/v1beta1
 kind: Gateway
 metadata:
-  name: network-test-gateway
-  namespace: network-test
+  name: ewp-gateway
+  namespace: ewp
 spec:
   selector:
     istio: ingressgateway
     app: istio-ingressgateway
   servers:
-    # HTTPS server: serves HTTP/1.1 and HTTP/2 (ALPN negotiation)
     - port:
         number: 443
         name: https
         protocol: HTTPS
       tls:
         mode: SIMPLE
-        credentialName: network-test-tls   # Secret in istio-system namespace
+        credentialName: ewp-tls
       hosts:
-        - "network-test.${TEST_DOMAIN}"
-    # HTTP redirect (optional, for testing fallback)
+        - "ewp.${TEST_DOMAIN}"
     - port:
         number: 80
         name: http
         protocol: HTTP
       hosts:
-        - "network-test.${TEST_DOMAIN}"
+        - "ewp.${TEST_DOMAIN}"
       tls:
         httpsRedirect: true

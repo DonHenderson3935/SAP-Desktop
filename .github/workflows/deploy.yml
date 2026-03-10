@@ -1,0 +1,197 @@
+name: Deploy EWP Server
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/ewp-server/**"
+      - "k8s/**"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/ewp-kyma/ewp-server
+  NAMESPACE: ewp
+  TEST_DOMAIN: c-8c4e4e1.kyma.ondemand.com
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: backend/ewp-server/Dockerfile
+          failure-threshold: error
+
+      - name: Check shell script syntax
+        run: sh -n backend/ewp-server/entrypoint.sh
+
+      - name: Lint YAML
+        run: |
+          pip install --quiet yamllint
+          yamllint -d "{extends: relaxed, rules: {line-length: {max: 200}}}" k8s/
+
+      - name: kubectl dry-run (standard K8s resources)
+        run: |
+          kubectl config set-cluster fake --server=https://fake:6443
+          kubectl config set-context fake --cluster=fake
+          kubectl config use-context fake
+          kubectl apply --dry-run=client --validate=false \
+            -f k8s/00-namespace.yaml \
+            -f k8s/backend/03-ewp-server.yaml
+
+  build-image:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    needs: validate
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend/ewp-server
+          file: ./backend/ewp-server/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+  deploy:
+    name: Deploy to Kyma
+    runs-on: ubuntu-latest
+    needs: build-image
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.28.0"
+
+      - name: Configure kubeconfig
+        env:
+          K8S_SERVER: ${{ secrets.K8S_SERVER }}
+          K8S_CA_DATA: ${{ secrets.K8S_CA_DATA }}
+          K8S_SA_TOKEN: ${{ secrets.K8S_SA_TOKEN }}
+        run: |
+          mkdir -p $HOME/.kube
+          touch $HOME/.kube/config && chmod 600 $HOME/.kube/config
+          echo "${K8S_CA_DATA}" | base64 -d > /tmp/ca.crt
+          kubectl config set-cluster kyma \
+            --server="${K8S_SERVER}" \
+            --certificate-authority=/tmp/ca.crt \
+            --embed-certs=true
+          kubectl config set-credentials ci-runner \
+            --token="${K8S_SA_TOKEN}"
+          kubectl config set-context kyma \
+            --cluster=kyma \
+            --user=ci-runner \
+            --namespace=ci-system
+          kubectl config use-context kyma
+          rm -f /tmp/ca.crt
+
+      - name: Substitute variables in manifests
+        env:
+          GITHUB_ORG: ${{ github.repository_owner }}
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
+          shopt -s globstar
+          for f in k8s/**/*.yaml k8s/*.yaml; do
+            [ -f "$f" ] || continue
+            sed -i \
+              -e "s|\${TEST_DOMAIN}|${{ env.TEST_DOMAIN }}|g" \
+              -e "s|ghcr.io/GITHUB_ORG/ewp-kyma/ewp-server:latest|${IMAGE_TAG}|g" \
+              -e "s|GITHUB_ORG|${GITHUB_ORG}|g" \
+              "$f"
+          done
+
+      - name: Detect Kyma wildcard TLS secret
+        id: tls
+        run: |
+          SECRET=$(kubectl get secret -n istio-system \
+            -o json 2>/dev/null \
+            | jq -r '.items[] | select(.type=="kubernetes.io/tls") | .metadata.name' \
+            | grep -E "wildcard|kyma|gardener|shoot" | head -1 || echo "")
+          SECRET="${SECRET:-ewp-tls}"
+          echo "secret_name=${SECRET}" >> $GITHUB_OUTPUT
+
+      - name: Apply namespace
+        run: kubectl apply -f k8s/00-namespace.yaml
+
+      - name: Create GHCR image pull secret
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GITHUB_ORG: ${{ github.repository_owner }}
+        run: |
+          kubectl create secret docker-registry ghcr-pull-secret \
+            --namespace=${{ env.NAMESPACE }} \
+            --docker-server=ghcr.io \
+            --docker-username="${GITHUB_ORG}" \
+            --docker-password="${GHCR_TOKEN}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Apply TLS certificate
+        run: |
+          sed -i "s|ewp-tls|${{ steps.tls.outputs.secret_name }}|g" k8s/tls/03-certificate.yaml
+          kubectl apply -f k8s/tls/03-certificate.yaml
+
+      - name: Deploy
+        run: |
+          kubectl apply -f k8s/backend/03-ewp-server.yaml
+          kubectl apply -f k8s/gateway/04-gateway.yaml
+          kubectl apply -f k8s/gateway/07-destination-rule.yaml
+          kubectl apply -f k8s/gateway/06-virtual-service.yaml
+
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/ewp-server -n ${{ env.NAMESPACE }} --timeout=180s
+
+      - name: Deployment summary
+        run: |
+          GW_IP=$(kubectl get svc -n istio-system istio-ingressgateway \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}' \
+            2>/dev/null || echo "pending")
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| gRPC endpoint | \`ewp.${{ env.TEST_DOMAIN }}:443\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| TLS secret | \`${{ steps.tls.outputs.secret_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`sha-$(echo '${{ github.sha }}' | cut -c1-7)\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ingress IP | \`${GW_IP}\` |" >> $GITHUB_STEP_SUMMARY
