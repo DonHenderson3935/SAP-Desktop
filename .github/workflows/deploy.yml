@@ -37,30 +37,13 @@ jobs:
           pip install --quiet yamllint
           yamllint -d "{extends: relaxed, rules: {line-length: {max: 200}}}" k8s/
 
-      - name: kubectl dry-run (standard K8s resources)
+      - name: Validate K8s manifests (kubeconform)
         run: |
-          cat > /tmp/fake-kubeconfig.yaml << 'EOF'
-          apiVersion: v1
-          kind: Config
-          clusters:
-          - cluster:
-              server: https://fake:6443
-              insecure-skip-tls-verify: true
-            name: fake
-          contexts:
-          - context:
-              cluster: fake
-              user: fake
-            name: fake
-          current-context: fake
-          users:
-          - name: fake
-            user:
-              token: fake
-          EOF
-          kubectl --kubeconfig=/tmp/fake-kubeconfig.yaml apply --dry-run=client --validate=false \
-            -f k8s/00-namespace.yaml \
-            -f k8s/backend/03-ewp-server.yaml
+          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin
+          kubeconform -strict -ignore-missing-schemas \
+            k8s/00-namespace.yaml \
+            k8s/backend/03-ewp-server.yaml
 
   build-image:
     name: Build & Push
