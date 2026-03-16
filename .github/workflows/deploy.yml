@@ -170,7 +170,15 @@ jobs:
           echo "secret_name=${SECRET}" >> $GITHUB_OUTPUT
 
       - name: Apply namespace
-        run: kubectl apply -f k8s/00-namespace.yaml
+        run: |
+          kubectl apply -f k8s/00-namespace.yaml 2>/dev/null || \
+          kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f - || true
+          kubectl label namespace ${{ env.NAMESPACE }} \
+            istio-injection=enabled \
+            pod-security.kubernetes.io/enforce=privileged \
+            pod-security.kubernetes.io/warn=privileged \
+            pod-security.kubernetes.io/audit=privileged \
+            --overwrite
 
       - name: Create GHCR image pull secret
         env:

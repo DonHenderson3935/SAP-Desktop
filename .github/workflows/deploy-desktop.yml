@@ -81,7 +81,15 @@ jobs:
           echo "secret_name=${SECRET}" >> $GITHUB_OUTPUT
 
       - name: Apply namespace (privileged)
-        run: kubectl apply -f k8s/00-namespace.yaml
+        run: |
+          kubectl apply -f k8s/00-namespace.yaml 2>/dev/null || \
+          kubectl create namespace ${{ inputs.namespace }} --dry-run=client -o yaml | kubectl apply -f - || true
+          kubectl label namespace ${{ inputs.namespace }} \
+            istio-injection=enabled \
+            pod-security.kubernetes.io/enforce=privileged \
+            pod-security.kubernetes.io/warn=privileged \
+            pod-security.kubernetes.io/audit=privileged \
+            --overwrite
 
       - name: Inject TLS secret into Gateway
         run: |
@@ -94,7 +102,16 @@ jobs:
           kubectl apply -f k8s/gateway/05-desktop-vs.yaml
 
       - name: Wait for rollout
-        run: kubectl rollout status deployment/desktop -n ${{ env.NAMESPACE }} --timeout=300s
+        run: |
+          kubectl rollout status deployment/desktop -n ${{ env.NAMESPACE }} --timeout=300s || {
+            echo "=== Pod status ==="
+            kubectl get pods -n ${{ env.NAMESPACE }} -l app=desktop -o wide
+            echo "=== Pod describe ==="
+            kubectl describe pod -n ${{ env.NAMESPACE }} -l app=desktop
+            echo "=== Pod logs ==="
+            kubectl logs -n ${{ env.NAMESPACE }} -l app=desktop --tail=50 2>/dev/null || true
+            exit 1
+          }
 
       - name: Deployment summary
         run: |

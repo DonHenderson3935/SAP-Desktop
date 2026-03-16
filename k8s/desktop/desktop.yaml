@@ -50,14 +50,16 @@ spec:
             httpGet:
               path: /
               port: 3000
-            initialDelaySeconds: 15
-            periodSeconds: 10
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 10
           livenessProbe:
             httpGet:
               path: /
               port: 3000
-            initialDelaySeconds: 30
+            initialDelaySeconds: 90
             periodSeconds: 30
+            failureThreshold: 5
           securityContext:
             allowPrivilegeEscalation: true
             runAsNonRoot: false
