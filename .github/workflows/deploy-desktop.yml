@@ -1,0 +1,107 @@
+name: Deploy Desktop (noVNC)
+
+on:
+  workflow_dispatch:
+    inputs:
+      k8s_server:
+        description: "API Server URL"
+        required: true
+        default: "https://api.c-98b37ee.kyma.ondemand.com"
+      namespace:
+        description: "Deploy namespace"
+        required: true
+        default: "ewp"
+      sa_namespace:
+        description: "ServiceAccount namespace"
+        required: true
+        default: "admin"
+      test_domain:
+        description: "Kyma cluster domain (e.g. c-98b37ee.kyma.ondemand.com)"
+        required: true
+        default: "c-98b37ee.kyma.ondemand.com"
+
+env:
+  NAMESPACE: ${{ inputs.namespace }}
+  TEST_DOMAIN: ${{ inputs.test_domain }}
+
+jobs:
+  deploy-desktop:
+    name: Deploy Desktop to Kyma
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.28.0"
+
+      - name: Configure kubeconfig
+        env:
+          K8S_CA_DATA: ${{ secrets.K8S_CA_DATA }}
+          K8S_SA_TOKEN: ${{ secrets.K8S_SA_TOKEN }}
+        run: |
+          mkdir -p $HOME/.kube
+          touch $HOME/.kube/config && chmod 600 $HOME/.kube/config
+          echo "${K8S_CA_DATA}" | base64 -d > /tmp/ca.crt
+          kubectl config set-cluster kyma \
+            --server="${{ inputs.k8s_server }}" \
+            --certificate-authority=/tmp/ca.crt \
+            --embed-certs=true
+          kubectl config set-credentials ci-runner \
+            --token="${K8S_SA_TOKEN}"
+          kubectl config set-context kyma \
+            --cluster=kyma \
+            --user=ci-runner \
+            --namespace="${{ inputs.sa_namespace }}"
+          kubectl config use-context kyma
+          rm -f /tmp/ca.crt
+
+      - name: Substitute variables in manifests
+        run: |
+          for f in k8s/desktop/*.yaml k8s/gateway/04-gateway.yaml k8s/gateway/05-desktop-vs.yaml k8s/00-namespace.yaml; do
+            [ -f "$f" ] || continue
+            sed -i \
+              -e "s|\${TEST_DOMAIN}|${{ inputs.test_domain }}|g" \
+              -e "s|\${DESKTOP_PASSWORD}|${{ secrets.DESKTOP_PASSWORD }}|g" \
+              "$f"
+          done
+
+      - name: Detect Kyma wildcard TLS secret
+        id: tls
+        run: |
+          SECRET=$(kubectl get secret -n istio-system \
+            -o json 2>/dev/null \
+            | jq -r '.items[] | select(.type=="kubernetes.io/tls") | .metadata.name' \
+            | grep -E "wildcard|kyma|gardener|shoot" | head -1 || echo "")
+          SECRET="${SECRET:-ewp-tls}"
+          echo "secret_name=${SECRET}" >> $GITHUB_OUTPUT
+
+      - name: Apply namespace (privileged)
+        run: kubectl apply -f k8s/00-namespace.yaml
+
+      - name: Inject TLS secret into Gateway
+        run: |
+          sed -i "s|ewp-tls|${{ steps.tls.outputs.secret_name }}|g" k8s/gateway/04-gateway.yaml
+
+      - name: Deploy desktop
+        run: |
+          kubectl apply -f k8s/desktop/desktop.yaml
+          kubectl apply -f k8s/gateway/04-gateway.yaml
+          kubectl apply -f k8s/gateway/05-desktop-vs.yaml
+
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/desktop -n ${{ env.NAMESPACE }} --timeout=300s
+
+      - name: Deployment summary
+        run: |
+          echo "## Desktop Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| URL | https://desktop.${{ inputs.test_domain }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Namespace | \`${{ inputs.namespace }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Auth | Password from \`DESKTOP_PASSWORD\` secret |" >> $GITHUB_STEP_SUMMARY
+          echo "| Resources | 3c / 12Gi |" >> $GITHUB_STEP_SUMMARY

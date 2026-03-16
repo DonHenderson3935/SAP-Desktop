@@ -1,0 +1,195 @@
+name: Renew Kyma Trial Instance
+
+on:
+  schedule:
+    - cron: "0 0 1,13 * *"   # day 1 and day 13 of every month
+  workflow_dispatch:
+
+env:
+  BTP_CLI_VERSION: "2.66.0"
+  BTP_API_URL: "https://cli.btp.cloud.sap"
+
+jobs:
+  renew:
+    name: Recreate Kyma Trial & Update Secrets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      secrets: write      # gh secret set needs this via GITHUB_TOKEN
+
+    steps:
+      - name: Install btp CLI
+        run: |
+          curl -sL \
+            "https://tools.hana.ondemand.com/additional/btp-cli-linux-amd64-${BTP_CLI_VERSION}.tar.gz" \
+            -o /tmp/btp.tar.gz
+          tar xz -C /usr/local/bin -f /tmp/btp.tar.gz --strip-components=1
+          btp --version
+
+      - name: BTP Login
+        env:
+          BTP_USER: ${{ secrets.BTP_USER }}
+          BTP_PASSWORD: ${{ secrets.BTP_PASSWORD }}
+          BTP_GLOBAL_ACCOUNT: ${{ secrets.BTP_GLOBAL_ACCOUNT }}
+        run: |
+          btp login \
+            --url "${BTP_API_URL}" \
+            --global-account "${BTP_GLOBAL_ACCOUNT}" \
+            --user "${BTP_USER}" \
+            --password "${BTP_PASSWORD}"
+
+      - name: Delete existing Kyma instance (if any)
+        env:
+          BTP_SUBACCOUNT: ${{ secrets.BTP_SUBACCOUNT_ID }}
+        run: |
+          INSTANCE_ID=$(btp list accounts/environment-instance \
+            --subaccount "${BTP_SUBACCOUNT}" --output json 2>/dev/null \
+            | jq -r '.environmentInstances[] | select(.environmentType=="kyma") | .id' \
+            | head -1 || echo "")
+          if [ -n "${INSTANCE_ID}" ]; then
+            echo "Deleting instance: ${INSTANCE_ID}"
+            btp delete accounts/environment-instance "${INSTANCE_ID}" \
+              --subaccount "${BTP_SUBACCOUNT}" --confirm
+            echo "Waiting for deletion..."
+            for i in $(seq 1 30); do
+              STATUS=$(btp get accounts/environment-instance "${INSTANCE_ID}" \
+                --subaccount "${BTP_SUBACCOUNT}" --output json 2>/dev/null \
+                | jq -r '.state' || echo "deleted")
+              [ "${STATUS}" = "deleted" ] || [ "${STATUS}" = "" ] && break
+              echo "  State: ${STATUS} (${i}/30)"
+              sleep 20
+            done
+          else
+            echo "No existing Kyma instance found"
+          fi
+
+      - name: Create new Kyma trial instance
+        id: create
+        env:
+          BTP_SUBACCOUNT: ${{ secrets.BTP_SUBACCOUNT_ID }}
+        run: |
+          btp create accounts/environment-instance \
+            --subaccount "${BTP_SUBACCOUNT}" \
+            --display-name "ewp-kyma" \
+            --environment kyma \
+            --service kymaruntime \
+            --plan trial
+          echo "Waiting for Kyma to be ready (up to 20 min)..."
+          for i in $(seq 1 60); do
+            RESULT=$(btp list accounts/environment-instance \
+              --subaccount "${BTP_SUBACCOUNT}" --output json 2>/dev/null \
+              | jq -r '.environmentInstances[] | select(.environmentType=="kyma" and .displayName=="ewp-kyma")')
+            STATE=$(echo "${RESULT}" | jq -r '.state')
+            echo "  State: ${STATE} (${i}/60)"
+            if [ "${STATE}" = "OK" ]; then
+              INSTANCE_ID=$(echo "${RESULT}" | jq -r '.id')
+              KUBECONFIG_URL=$(echo "${RESULT}" | jq -r '.labels["KubeconfigURL"]')
+              echo "instance_id=${INSTANCE_ID}" >> $GITHUB_OUTPUT
+              echo "kubeconfig_url=${KUBECONFIG_URL}" >> $GITHUB_OUTPUT
+              break
+            fi
+            sleep 20
+          done
+          [ "${STATE}" = "OK" ] || { echo "Timeout waiting for Kyma"; exit 1; }
+
+      - name: Get BTP OAuth token
+        id: token
+        env:
+          BTP_USER: ${{ secrets.BTP_USER }}
+          BTP_PASSWORD: ${{ secrets.BTP_PASSWORD }}
+          BTP_AUTH_URL: ${{ secrets.BTP_AUTH_URL }}    # https://<subaccount>.authentication.<region>.hana.ondemand.com
+          BTP_CLIENT_ID: ${{ secrets.BTP_CLIENT_ID }}  # from BTP service binding or cockpit
+          BTP_CLIENT_SECRET: ${{ secrets.BTP_CLIENT_SECRET }}
+        run: |
+          TOKEN=$(curl -sf -X POST \
+            "${BTP_AUTH_URL}/oauth/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=password" \
+            -d "username=${BTP_USER}" \
+            -d "password=${BTP_PASSWORD}" \
+            -d "client_id=${BTP_CLIENT_ID}" \
+            -d "client_secret=${BTP_CLIENT_SECRET}" \
+            | jq -r '.access_token')
+          echo "token=${TOKEN}" >> $GITHUB_OUTPUT
+
+      - name: Download kubeconfig
+        run: |
+          curl -sf \
+            "${{ steps.create.outputs.kubeconfig_url }}" \
+            -H "Authorization: Bearer ${{ steps.token.outputs.token }}" \
+            -o /tmp/kyma-kubeconfig.yaml
+          echo "Kubeconfig downloaded"
+          API_SERVER=$(grep server: /tmp/kyma-kubeconfig.yaml | awk '{print $2}')
+          echo "API Server: ${API_SERVER}"
+          echo "api_server=${API_SERVER}" >> $GITHUB_ENV
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.28.0"
+
+      - name: Create ci-runner ServiceAccount & long-lived token
+        run: |
+          export KUBECONFIG=/tmp/kyma-kubeconfig.yaml
+
+          kubectl create namespace ci-system --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl apply -f - << 'EOF'
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: ci-runner
+            namespace: ci-system
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: ci-runner-admin
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: cluster-admin
+          subjects:
+          - kind: ServiceAccount
+            name: ci-runner
+            namespace: ci-system
+          ---
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: ci-runner-token
+            namespace: ci-system
+            annotations:
+              kubernetes.io/service-account.name: ci-runner
+          type: kubernetes.io/service-account-token
+          EOF
+
+          echo "Waiting for token to be populated..."
+          for i in $(seq 1 15); do
+            SA_TOKEN=$(kubectl get secret ci-runner-token -n ci-system \
+              -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || echo "")
+            [ -n "${SA_TOKEN}" ] && break
+            sleep 2
+          done
+
+          CA_DATA=$(kubectl get secret ci-runner-token -n ci-system \
+            -o jsonpath='{.data.ca\.crt}')
+
+          echo "sa_token=${SA_TOKEN}" >> $GITHUB_ENV
+          echo "ca_data=${CA_DATA}" >> $GITHUB_ENV
+
+      - name: Update GitHub Secrets
+        env:
+          GH_TOKEN: ${{ secrets.ACTIONS_TOKEN }}   # PAT with secrets:write scope
+        run: |
+          REPO="${{ github.repository }}"
+          gh secret set K8S_SERVER     --repo "${REPO}" --body "${api_server}"
+          gh secret set K8S_SA_TOKEN   --repo "${REPO}" --body "${sa_token}"
+          gh secret set K8S_CA_DATA    --repo "${REPO}" --body "${ca_data}"
+          echo "Secrets updated"
+
+      - name: Trigger deploy workflow
+        env:
+          GH_TOKEN: ${{ secrets.ACTIONS_TOKEN }}
+        run: |
+          gh workflow run deploy.yml --repo "${{ github.repository }}"

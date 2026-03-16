@@ -2,6 +2,23 @@ name: Deploy EWP Server
 
 on:
   workflow_dispatch:
+    inputs:
+      k8s_server:
+        description: "API Server URL"
+        required: true
+        default: "https://api.c-98b37ee.kyma.ondemand.com"
+      namespace:
+        description: "Deploy namespace"
+        required: true
+        default: "ewp"
+      sa_namespace:
+        description: "ServiceAccount namespace"
+        required: true
+        default: "admin"
+      test_domain:
+        description: "Kyma cluster domain (e.g. c-98b37ee.kyma.ondemand.com)"
+        required: true
+        default: "c-98b37ee.kyma.ondemand.com"
   push:
     branches:
       - main
@@ -12,8 +29,8 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/ewp-kyma/ewp-server
-  NAMESPACE: ewp
-  TEST_DOMAIN: c-8c4e4e1.kyma.ondemand.com
+  NAMESPACE: ${{ inputs.namespace || 'ewp' }}
+  TEST_DOMAIN: ${{ inputs.test_domain || 'c-98b37ee.kyma.ondemand.com' }}
 
 jobs:
   validate:
@@ -114,7 +131,7 @@ jobs:
           touch $HOME/.kube/config && chmod 600 $HOME/.kube/config
           echo "${K8S_CA_DATA}" | base64 -d > /tmp/ca.crt
           kubectl config set-cluster kyma \
-            --server="${K8S_SERVER}" \
+            --server="${{ inputs.k8s_server || secrets.K8S_SERVER }}" \
             --certificate-authority=/tmp/ca.crt \
             --embed-certs=true
           kubectl config set-credentials ci-runner \
@@ -122,7 +139,7 @@ jobs:
           kubectl config set-context kyma \
             --cluster=kyma \
             --user=ci-runner \
-            --namespace=ci-system
+            --namespace="${{ inputs.sa_namespace || 'admin' }}"
           kubectl config use-context kyma
           rm -f /tmp/ca.crt
 

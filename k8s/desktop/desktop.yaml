@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: desktop
+  namespace: ewp
+  labels:
+    app: desktop
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: desktop
+  template:
+    metadata:
+      labels:
+        app: desktop
+    spec:
+      containers:
+        - name: desktop
+          image: lscr.io/linuxserver/webtop:ubuntu-xfce
+          ports:
+            - containerPort: 3000
+              name: http
+              protocol: TCP
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: desktop-secret
+                  key: password
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: shm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "3"
+              memory: 12Gi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: true
+            runAsNonRoot: false
+            runAsUser: 0
+            readOnlyRootFilesystem: false
+      volumes:
+        - name: config
+          emptyDir:
+            sizeLimit: 8Gi
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: desktop-secret
+  namespace: ewp
+type: Opaque
+stringData:
+  password: "${DESKTOP_PASSWORD}"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: desktop
+  namespace: ewp
+  labels:
+    app: desktop
+spec:
+  selector:
+    app: desktop
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      protocol: TCP
+  type: ClusterIP

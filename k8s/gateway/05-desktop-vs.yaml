@@ -1,0 +1,17 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: desktop-vs
+  namespace: ewp
+spec:
+  hosts:
+    - "desktop.${TEST_DOMAIN}"
+  gateways:
+    - ewp-gateway
+  http:
+    - name: "route-desktop"
+      route:
+        - destination:
+            host: desktop.ewp.svc.cluster.local
+            port:
+              number: 3000

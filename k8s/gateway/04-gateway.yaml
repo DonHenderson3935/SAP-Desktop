@@ -17,11 +17,13 @@ spec:
         credentialName: ewp-tls
       hosts:
         - "ewp.${TEST_DOMAIN}"
+        - "desktop.${TEST_DOMAIN}"
     - port:
         number: 80
         name: http
         protocol: HTTP
       hosts:
         - "ewp.${TEST_DOMAIN}"
+        - "desktop.${TEST_DOMAIN}"
       tls:
         httpsRedirect: true
