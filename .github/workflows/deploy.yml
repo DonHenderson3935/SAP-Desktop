@@ -135,7 +135,7 @@ jobs:
             --certificate-authority=/tmp/ca.crt \
             --embed-certs=true
           kubectl config set-credentials ci-runner \
-            --token="${K8S_SA_TOKEN}"
+            --token="$(echo "${K8S_SA_TOKEN}" | tr -d '\n\r ')"
           kubectl config set-context kyma \
             --cluster=kyma \
             --user=ci-runner \
