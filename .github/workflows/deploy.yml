@@ -19,18 +19,13 @@ on:
         description: "Kyma cluster domain (e.g. c-98b37ee.kyma.ondemand.com)"
         required: true
         default: "c-98b37ee.kyma.ondemand.com"
-  push:
-    branches:
-      - main
-    paths:
-      - "backend/ewp-server/**"
-      - "k8s/**"
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/ewp-kyma/ewp-server
   NAMESPACE: ${{ inputs.namespace || 'ewp' }}
   TEST_DOMAIN: ${{ inputs.test_domain || 'c-98b37ee.kyma.ondemand.com' }}
+  OWNER: ${{ github.repository_owner }}
 
 jobs:
   validate:
@@ -85,11 +80,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute lowercase owner
+        id: owner
+        run: echo "name=$(echo '${{ env.OWNER }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/ewp-kyma/ewp-server
           tags: |
             type=sha,prefix=sha-
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
@@ -143,19 +142,22 @@ jobs:
           kubectl config use-context kyma
           rm -f /tmp/ca.crt
 
+      - name: Compute lowercase owner
+        id: owner
+        run: echo "name=$(echo '${{ env.OWNER }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
       - name: Substitute variables in manifests
-        env:
-          GITHUB_ORG: ${{ github.repository_owner }}
         run: |
+          OWNER="${{ steps.owner.outputs.name }}"
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
+          IMAGE_TAG="ghcr.io/${OWNER}/ewp-kyma/ewp-server:sha-${SHORT_SHA}"
           shopt -s globstar
           for f in k8s/**/*.yaml k8s/*.yaml; do
             [ -f "$f" ] || continue
             sed -i \
               -e "s|\${TEST_DOMAIN}|${{ env.TEST_DOMAIN }}|g" \
               -e "s|ghcr.io/GITHUB_ORG/ewp-kyma/ewp-server:latest|${IMAGE_TAG}|g" \
-              -e "s|GITHUB_ORG|${GITHUB_ORG}|g" \
+              -e "s|GITHUB_ORG|${OWNER}|g" \
               "$f"
           done
 
