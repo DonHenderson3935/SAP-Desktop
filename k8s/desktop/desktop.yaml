@@ -47,17 +47,15 @@ spec:
               cpu: "3"
               memory: 12Gi
           readinessProbe:
-            httpGet:
-              path: /
+            tcpSocket:
               port: 3000
-            initialDelaySeconds: 60
-            periodSeconds: 15
+            initialDelaySeconds: 30
+            periodSeconds: 10
             failureThreshold: 10
           livenessProbe:
-            httpGet:
-              path: /
+            tcpSocket:
               port: 3000
-            initialDelaySeconds: 90
+            initialDelaySeconds: 60
             periodSeconds: 30
             failureThreshold: 5
           securityContext:
