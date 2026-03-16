@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: desktop
-          image: lscr.io/linuxserver/webtop:ubuntu-xfce
+          image: ghcr.io/GITHUB_ORG/ewp-kyma/desktop:latest
           ports:
             - containerPort: 3000
               name: http
